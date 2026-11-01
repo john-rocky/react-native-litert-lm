@@ -579,7 +579,7 @@ rec.reason;     // why, including any backends it skipped</code></pre>
           <td><code>getContextTokenCount()</code> after <code>resetConversation()</code> replays a transcript</td>
           <td>The engine's count once the new conversation is created</td>
           <td>-1 until the next message completes</td>
-          <td>The engine prefills a replayed transcript with the next message. Without a transcript, both read the new conversation's count after the reset.</td>
+          <td>The engine prefills a replayed transcript with the next message. Without a transcript, both read the new conversation's count after the reset, unless on Android the reset gives up waiting for a message it cancelled.</td>
         </tr>
         <tr>
           <td>GPU backend</td>

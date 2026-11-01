@@ -627,7 +627,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
             val eng = engine?.takeIf { ready } ?: throw notLoaded()
             newConversation(
                 eng,
-                initialMessagesJson = historyJson,
+                transcript = transcript,
                 systemPromptOverride = systemPrompt,
                 speculativeDecoding = speculativeDecoding,
             ).also { conversation = it }
@@ -890,14 +890,21 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     /**
      * Read the count of the conversation a reset just installed, on a thread of
      * its own, claimed like a message so a close can't free the conversation
-     * mid-read. Recorded only while that conversation is still the live one, no
+     * mid-read. Not started while a retired conversation is still open (a
+     * cancelled message hasn't returned): the engine would hold the read until
+     * that message ends, and a reset waits for a read as for a message. The
+     * count then stays -1 until the next message completes. Recorded only while
+     * that conversation is still the live one, no
      * message has started in it (that message records its own count when it
      * completes, so the count doesn't move while one generates), and no count
      * has landed since the read began.
      */
     private fun readContextTokensInBackground(target: Conversation) {
         thread(name = "LiteRTLM-context-tokens") {
-            if (!beginGeneration(target, message = false)) return@thread
+            val claimed = stateLock.withLock {
+                retiredConversations.isEmpty() && beginGeneration(target, message = false)
+            }
+            if (!claimed) return@thread
             try {
                 if (stateLock.withLock { messageStartedIn === target }) return@thread
                 val before = contextTokens.get()
@@ -928,7 +935,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     /** A new conversation on [engine]; the caller installs it (the old one is retired first). */
     private fun newConversation(
         engine: Engine,
-        initialMessagesJson: String? = null,
+        transcript: List<Message> = emptyList(),
         systemPromptOverride: String? = null,
         speculativeDecoding: Boolean? = null,
     ): Conversation {
@@ -974,7 +981,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
             // Seed with a prior transcript (multi-conversation switching); the
             // engine re-prefills these on the next message.
             // Tool exchanges replay as model tool calls and 'tool' responses.
-            initialMessages = parseTranscript(initialMessagesJson).map { it.toSdkMessage() },
+            initialMessages = transcript.map { it.toSdkMessage() },
             tools = lmTools ?: emptyList(),
             // The SDK defaults to auto-running tool calls against OpenApiTool.execute()
             // (a stub here). Tool execution belongs to the JS side — surface the

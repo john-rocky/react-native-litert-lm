@@ -721,7 +721,7 @@ class HybridLiteRTLMInstrumentedTest {
             val reached = CountDownLatch(1)
             val release = CountDownLatch(1)
             @Volatile var engineMs = -1.0
-            private val calls = AtomicInteger()
+            val calls = AtomicInteger()
             init {
                 val read = llm.readContextTokens
                 llm.readContextTokens = { conversation ->
@@ -827,36 +827,46 @@ class HybridLiteRTLMInstrumentedTest {
                 llm.readContextTokens = read
             }
 
-            // A second reset while the first read holds its claim: the second count lands.
+            // A second reset while the first read holds its claim, let go during the
+            // reset's 2 s wait: the reset waits for it, and the second count lands.
             run {
                 val hold = HeldRead(llm, 1, afterEngine = true)
                 llm.resetConversation(null, null, null)
                 assertTrue("the read never ran", hold.reached.await(10, TimeUnit.SECONDS))
-                ms("resetConversation while the first read is held") { llm.resetConversation(null, null, null) }
+                val letGo = thread { Thread.sleep(500); hold.release.countDown() }
+                ms("resetConversation while the first read is held for 0.5 s") { llm.resetConversation(null, null, null) }
+                letGo.join()
                 val second = knownContextTokens(llm)
-                hold.release.countDown()
                 Thread.sleep(1_000)
                 val after = llm.getContextTokenCount()
-                println("[android-int][reset-count] second reset: $second, after the first read returned $after")
+                println("[android-int][reset-count] second reset: $second, 1 s later $after")
                 assertTrue("the second reset's count never landed: $second", second >= 0)
                 assertEquals("the first read changed the second reset's count", second, after, 0.0)
                 llm.readContextTokens = read
             }
 
-            // Both reads held; the first one is let go between the second's start and its write.
+            // A second reset while the first read holds its claim past the reset's
+            // 2 s wait, as a cancelled message that hasn't returned would: no read
+            // starts while that claim is out, so the count stays -1, also once the
+            // first read has returned, and the next message records its own count.
             run {
-                val first = HeldRead(llm, 1, afterEngine = true)
-                val second = HeldRead(llm, 2, afterEngine = true)
+                val hold = HeldRead(llm, 1, afterEngine = true)
                 llm.resetConversation(null, null, null)
-                assertTrue("the first read never ran", first.reached.await(10, TimeUnit.SECONDS))
-                llm.resetConversation(null, null, null)
-                assertTrue("the second read never ran", second.reached.await(10, TimeUnit.SECONDS))
-                first.release.countDown()
-                Thread.sleep(500)
-                second.release.countDown()
-                val landed = knownContextTokens(llm)
-                println("[android-int][reset-count] first read let go before the second wrote: $landed")
-                assertTrue("the first read kept the second reset's count out: $landed", landed >= 0)
+                assertTrue("the read never ran", hold.reached.await(10, TimeUnit.SECONDS))
+                ms("resetConversation while the first read is held past its wait") { llm.resetConversation(null, null, null) }
+                Thread.sleep(1_000)
+                val whileHeld = llm.getContextTokenCount()
+                hold.release.countDown()
+                Thread.sleep(1_000)
+                val returned = llm.getContextTokenCount()
+                generate(llm, "Say hello.", short)
+                val message = llm.getContextTokenCount()
+                println("[android-int][reset-count] second reset, first read held past its wait: count while held $whileHeld, " +
+                    "after the first read returned $returned, after the next message $message, reads ${hold.calls.get()}")
+                assertEquals("a read started while the first read held its claim", 1, hold.calls.get())
+                assertEquals("a count while the first read held its claim", -1.0, whileHeld, 0.0)
+                assertEquals("a count after the first read returned", -1.0, returned, 0.0)
+                assertTrue("no count after the next message: $message", message > 0)
                 llm.readContextTokens = read
             }
         } finally {
